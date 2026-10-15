@@ -1,0 +1,85 @@
+name: COPIMAR Supabase Keepalive
+
+on:
+  schedule:
+    # Cada 3 días a las 9:00h (Madrid, hora peninsular)
+    - cron: '0 7 */3 * *'
+  workflow_dispatch:   # También permite lanzarlo manualmente
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Enviar lecturas ficticias a Supabase
+        run: |
+          python3 << 'PYEOF'
+          import requests, sys
+          from datetime import datetime
+
+          SUPABASE_URL = "https://snxqmtaieewnnhrtbgtl.supabase.co"
+          ANON_KEY    = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNueHFtdGFpZWV3bm5ocnRiZ3RsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA0Njc2NzMsImV4cCI6MjA4NjA0MzY3M30.OD5AFXTmvny23v6_CJqc6s2_xewYC672I_ARmQeGy6M"
+
+          H  = {"apikey": ANON_KEY, "Authorization": f"Bearer {ANON_KEY}", "Content-Type": "application/json"}
+          HR = {**H, "Prefer": "return=representation"}
+
+          def get(table, params):
+              r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}", params=params, headers=H, timeout=15)
+              r.raise_for_status(); return r.json()
+
+          def post(table, data, ret=True):
+              r = requests.post(f"{SUPABASE_URL}/rest/v1/{table}", json=data, headers=HR if ret else H, timeout=15)
+              r.raise_for_status(); return r.json() if ret else None
+
+          def patch(table, params, data):
+              r = requests.patch(f"{SUPABASE_URL}/rest/v1/{table}", params=params, json=data, headers=H, timeout=15)
+              r.raise_for_status()
+
+          now   = datetime.now()
+          fecha = now.strftime("%Y-%m-%d")
+          hora  = now.strftime("%H:%M:%S")
+          print(f"=== COPIMAR Keepalive  {fecha}  {hora} ===")
+
+          total, errores = 0, []
+
+          for code in ["2222", "3333", "4444", "5555"]:
+              try:
+                  clientes = get("clientes", {"select": "*", "codigo": f"like.%{code}"})
+                  cliente  = next((c for c in clientes if str(c["codigo"])[-4:] == code), None)
+                  if not cliente:
+                      print(f"  ⚠  {code}: cliente no encontrado"); errores.append(code); continue
+
+                  equipos = get("equipos", {"select": "*", "codigo_cliente": f"eq.{cliente['codigo']}"})
+                  if not equipos:
+                      print(f"  ⚠  {code}: sin equipos"); continue
+
+                  envio_id = post("envios", {
+                      "codigo_cliente": cliente["codigo"],
+                      "notas": "Lectura automática keepalive",
+                      "fecha_envio": fecha, "hora_envio": hora
+                  })[0]["id"]
+
+                  for eq in equipos:
+                      bn  = (eq.get("ultimo_bn")    or 0) + 1
+                      col = (eq.get("ultimo_color") + 1) if eq.get("ultimo_color") is not None else None
+                      post("lecturas", {
+                          "envio_id": envio_id,       "codigo_cliente": cliente["codigo"],
+                          "equipo_id": eq["id"],      "serie": eq["serie"],
+                          "contador_bn": bn,          "contador_color": col,
+                          "consumo_bn": 1,            "consumo_color": 1 if col is not None else None,
+                          "fecha_lectura": fecha,     "hora_lectura": hora
+                      }, ret=False)
+                      upd = {"fecha_ultima_lectura": fecha, "ultimo_bn": bn}
+                      if col is not None: upd["ultimo_color"] = col
+                      patch("equipos", {"id": f"eq.{eq['id']}"}, upd)
+                      total += 1
+
+                  print(f"  ✓  {code} ({cliente['nombre']}): {len(equipos)} equipo(s) actualizados")
+
+              except Exception as e:
+                  print(f"  ✗  {code}: {e}"); errores.append(str(e))
+
+          print(f"\nTotal equipos actualizados: {total}")
+          if errores: sys.exit(1)
+          print("Keepalive completado sin errores ✓")
+          PYEOF
